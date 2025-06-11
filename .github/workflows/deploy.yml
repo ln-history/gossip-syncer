@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - dev
+      - 37-store-gossip-messages-for-fast-retrieval-of-edge-set
 
 jobs:
   deploy:

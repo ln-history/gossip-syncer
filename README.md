@@ -1,57 +1,3 @@
-# gossip-syncer
-
-## Summary
-The micro-service subscribes to a [zero-message-queue](https://zmq.org) to which gossip messages of the [Bitcoin Lightning Network](https://lightning.network/) get sent to.
-It calculates an `id` for every gossip message and checks in a [Valkey](https://valkey.io/) cache if this exact gossip message has been read previously. 
-when performing the check, metadata of the gossip message gets stored as well.
-If it is new it gets published to a [Kafka](https://kafka.apache.org/) instance.
-
-## How it works
-The gossip messages get processed in their raw binary form.
-This raw binary gets hashed using the [SHA256](https://en.wikipedia.org/wiki/SHA-2) hash function.
-The result is the `gossip_id` - unique for every gossip message. 
-The first two bits of every gossip message define the message type as specified in [BOLT #7](https://github.com/lightning/bolts/blob/master/07-routing-gossip.md). 
-For every gossip message type the cache has a "hashtable" in which the micro service looks.
-
-The hashtable has the following structure:
-```
-{gossip_id}:seen_by:{sender_node_id}[]<list of timestsamps>
-```
-
-There are several cases to handle:
-
-- New gossip message:
-Add a new entry in the corresponding hashtable with the `gossip_id`. Add the whole schema {seen_by: ["{sender_node_id}": ["<timestamp of gossip message from zmq>"]]}
-Publish the gossip message via the KafkaProducer
-
-- Known gossip message:
-If a gossip message get consumed which `gossip_id` is already in the cache, just append the metadata from the zmq-message (sender_node_id and timestamp) accordingly.
-Don't publish the message.
-
-- Type of gossip message is not in [256,257,258,4103] -> log an error, don't publish the message
-
-
-## Data
-
-How does a consumed gossip message look like?
-
-The overall structure of the gossip looks like this:
-```json
-{
-    "metadata": 
-        {
-            "type": <type of message as specified in BOLT #7>,
-            "flags": "flags",
-            "timestamp": "timestamp of the collection of the message",
-            "is_push": "bool(flags & FLAG_PUSH)",
-            "is_dying": "bool(flags & FLAG_DYING)",
-            "sender_node_id": <node-id of sending lightning node>,
-            "length": "length of message exluding type field (meaning total_length - 2)"
-        },
-    "raw_hex": "hex of message (Should get parsed to binary)",   
-}
-```
-
 # 🔄 gossip-syncer
 
 ## 🧠 Summary
@@ -138,10 +84,25 @@ Each message consumed from ZeroMQ has this JSON shape:
 {
   "metadata": {
     "type": 256,                     // Message type from BOLT #7
-    "timestamp": "2025-06-11T12:00:00Z",  // Timestamp the gossip message was seen
-    "is_dying": false,              // Status information about the gossip-publisher-zmq plugin 
-    "sender_node_id": "029a...",     // Node ID that relayed the message
-    "length": 136                    // Length excluding 2-byte type prefix
+    "timestamp": "2025-06-11T12:00:00Z",  // Timestamp when the gossip message was seen
+    "is_dying": false,              // Status information about the gossip-publisher-zmq plugin (can be ignored)
+    "sender_node_id": "029a...",     // Node ID that collected and relayed the message
+    "length": 136                    // Byte length excluding 2-byte type prefix
   },
   "raw_hex": "0100abcdef..."         // Full hex-encoded message payload
 }
+```
+
+---
+
+## 🛠️ Development
+
+### ⚙️ Environment Setup
+1. Copy the [.example.env](.example.env) file and rename it to `.env`:
+
+```bash
+cp .example.env .env
+```
+
+2. Open `.env` and fill in the credentials and configuration values.
+💡 Make sure your .env file is never committed to version control—it's ignored via .gitignore.

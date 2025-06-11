@@ -5,7 +5,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from kafka import KafkaProducer
 from valkey_client import ValkeyCache
-from config import ZMQ_HOST, ZMQ_PORT, ZMQ_TOPIC, KAFKA_TOPIC_TO_PUSH
+from config import ZMQ_HOST, ZMQ_PORT, ZMQ_TOPIC, KAFKA_TOPIC_TO_PUSH, KAFKA_SERVER_IP_ADDRESS, KAFKA_SERVER_PORT
 from gossip_types import GOSSIP_TYPE_NAMES, CORE_LIGHTNING_TYPES, PROCESSABLE_TYPES, MSG_TYPE_CHANNEL_DYING
 
 def setup_logging(log_dir="logs", log_file="gossip_unifier.log") -> logging.Logger:
@@ -25,7 +25,8 @@ def setup_logging(log_dir="logs", log_file="gossip_unifier.log") -> logging.Logg
     return logger
 
 def create_kafka_producer() -> KafkaProducer:
-    bootstrap_servers = f"{os.getenv('SERVER_IP_ADDRESS')}:{os.getenv('SERVER_PORT')}"
+    bootstrap_servers = f"{KAFKA_SERVER_IP_ADDRESS}:{KAFKA_SERVER_PORT}"
+    
     return KafkaProducer(
         bootstrap_servers=[bootstrap_servers],
         client_id="gossip-syncer",
