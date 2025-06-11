@@ -1,3 +1,4 @@
 kafka-python
 python-dotenv
-psycopg2-binary
+valkey
+zmq
