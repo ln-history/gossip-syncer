@@ -1,15 +1,23 @@
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![Checked with mypy](https://img.shields.io/badge/type%20checked-mypy-blue)](http://mypy-lang.org/)
+![Uses: dataclasses](https://img.shields.io/badge/uses-dataclasses-brightgreen)
+![Uses: typing](https://img.shields.io/badge/uses-typing-blue)
+
+[![Commitizen friendly](https://img.shields.io/badge/commitizen-friendly-brightgreen.svg)](http://commitizen.github.io/cz-cli/)
+
 # 🔄 gossip-syncer
 
 ## 🧠 Summary
 
-`gossip-syncer` is a microservice that listens to a [ZeroMQ](https://zmq.org) stream of gossip messages from the [Bitcoin Lightning Network](https://lightning.network/).
+`gossip-syncer` is a microservice that listens to one or muliple [ZeroMQ](https://zmq.org) stream(s) of gossip messages from the [Bitcoin Lightning Network](https://lightning.network/).
 For [Core Lightning](https://corelightning.org/) nodes the [gossip-publisher-zmq plugin](https://github.com/ln-history/gossip-publisher-zmq) can be used. 
 
 For each message:
 
-- It computes a unique `gossip_id` using a [SHA256](https://en.wikipedia.org/wiki/SHA-2) hash of the raw binary
+- It computes a unique `gossip_id` using a [SHA256](https://en.wikipedia.org/wiki/SHA-2) hash of the raw binary of every consumed gossip message
 - It checks a [Valkey](https://valkey.io/) (Redis-compatible) cache to determine if this message has been seen before
-- Metadata is recorded for each message, regardless of whether it’s new or known
+- Metadata is recorded for each message (e. g. `sender_nod_id` the `node_id` of the Bitcoin Lightning Node that had sent the message)
 - Only new messages are forwarded to a specified [Kafka](https://kafka.apache.org/) topic
 
 ---
@@ -92,6 +100,8 @@ Each message consumed from ZeroMQ has this JSON shape:
   "raw_hex": "0100abcdef..."         // Full hex-encoded message payload
 }
 ```
+
+For more information see the [lnhistoryclient library](https://pypi.org/project/lnhistoryclient/) which provides models.
 
 ---
 
