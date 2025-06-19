@@ -3,17 +3,26 @@ import logging
 import os
 import signal
 import sys
+import threading
+from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
 from types import FrameType
-from typing import Optional
+from typing import List, Optional
 
 import zmq
 from kafka import KafkaProducer
 from lnhistoryclient.constants import ALL_TYPES, GOSSIP_TYPE_NAMES
 from lnhistoryclient.model.types import PlatformEvent, PlatformEventMetadata, PluginEvent, PluginEventMetadata
 
-from config import KAFKA_SERVER_IP_ADDRESS, KAFKA_SERVER_PORT, KAFKA_TOPIC_TO_PUSH, ZMQ_HOST, ZMQ_PORT, ZMQ_TOPIC
+import config
 from ValkeyClient import ValkeyCache
+
+
+@dataclass
+class ZmqSource:
+    host: str
+    port: int
+    topic: str
 
 
 def setup_logging(log_dir: str = "logs", log_file: str = "gossip_syncer.log") -> logging.Logger:
@@ -34,7 +43,7 @@ def setup_logging(log_dir: str = "logs", log_file: str = "gossip_syncer.log") ->
 
 
 def create_kafka_producer() -> KafkaProducer:
-    bootstrap_servers = f"{KAFKA_SERVER_IP_ADDRESS}:{KAFKA_SERVER_PORT}"
+    bootstrap_servers = f"{config.KAFKA_SERVER_IP_ADDRESS}:{config.KAFKA_SERVER_PORT}"
 
     return KafkaProducer(
         bootstrap_servers=[bootstrap_servers],
@@ -122,51 +131,115 @@ def forward_message_if_relevant(
         logger.error(f"Unknown gossip message type received: {msg_type}")
 
 
+def zmq_worker(
+    source: ZmqSource, cache: ValkeyCache, logger: logging.Logger, producer: KafkaProducer, stop_event: threading.Event
+) -> None:
+    """Worker thread that handles messages from a specific ZMQ source."""
+    context = zmq.Context()
+    socket = context.socket(zmq.SUB)
+
+    try:
+        socket.connect(f"tcp://{source.host}:{source.port}")
+        socket.setsockopt_string(zmq.SUBSCRIBE, source.topic)
+        logger.info(f"Worker connected to ZeroMQ at {source.host}:{source.port} for topic '{source.topic}'")
+
+        # Configure socket to poll with timeout to check for stop event
+        poller = zmq.Poller()
+        poller.register(socket, zmq.POLLIN)
+
+        while not stop_event.is_set():
+            socks = dict(poller.poll(timeout=1000))  # 1 second timeout
+
+            if socket in socks and socks[socket] == zmq.POLLIN:
+                topic = socket.recv_string()
+                message = socket.recv_json()
+                logger.debug(f"Received message from {source.host}:{source.port} with topic '{topic}'")
+                forward_message_if_relevant(message, cache, logger, producer, config.KAFKA_TOPIC_TO_PUSH)
+
+    except Exception as e:
+        logger.exception(f"Error in ZMQ worker for {source.host}:{source.port}: {e}")
+
+    finally:
+        socket.close()
+        logger.info(f"ZMQ worker for {source.host}:{source.port} shut down")
+
+
+def parse_zmq_sources() -> List[ZmqSource]:
+    """Parse ZMQ sources from the config."""
+    import config
+
+    sources = []
+    if config.ZMQ_SOURCES:
+        for src in config.ZMQ_SOURCES:
+            sources.append(ZmqSource(**src))
+    else:
+        sources.append(ZmqSource(host=config.ZMQ_HOST, port=config.ZMQ_PORT, topic=config.ZMQ_TOPIC))
+
+    return sources
+
+
 def shutdown(logger: logging.Logger, signum: Optional[int] = None, frame: Optional[FrameType] = None) -> None:
     """Clean up resources"""
-    global running, producer
+    global running, producer, stop_event
     logger.info("Shutting down gossip-post-processor...")
     running = False
+
+    # Signal all worker threads to stop
+    stop_event.set()  # type: ignore[union-attr]
+
     if producer:
         producer.close()
-        logger.info("Kafka consumer closed.")
+        logger.info("Kafka producer closed.")
     logger.info("Shutdown complete.")
     sys.exit(0)
 
 
 def main() -> None:
-    global producer
+    global producer, stop_event, running
 
     logger = setup_logging()
     logger.info("Starting gossip-syncer...")
 
-    context = zmq.Context()
-    socket = context.socket(zmq.SUB)
-    socket.connect(f"tcp://{ZMQ_HOST}:{ZMQ_PORT}")
-    socket.setsockopt_string(zmq.SUBSCRIBE, ZMQ_TOPIC)
-    logger.info(f"Subscribed to ZeroMQ at {ZMQ_HOST}:{ZMQ_PORT} at topic '{ZMQ_TOPIC}'")
-
+    # Initialize shared resources
     cache = ValkeyCache()
     producer = create_kafka_producer()
+    stop_event = threading.Event()
+
+    # Parse ZMQ sources from config
+    zmq_sources = parse_zmq_sources()
+    logger.info(f"Configured {len(zmq_sources)} ZMQ sources")
+
+    # Start worker threads for each ZMQ source
+    worker_threads = []
+    for source in zmq_sources:
+        worker = threading.Thread(
+            target=zmq_worker,
+            args=(source, cache, logger, producer, stop_event),
+            daemon=True,
+            name=f"zmq-worker-{source.host}-{source.port}",
+        )
+        worker.start()
+        worker_threads.append(worker)
+        logger.info(f"Started worker thread for {source.host}:{source.port}")
 
     # Register shutdown handler
     signal.signal(signal.SIGINT, lambda s, f: shutdown(logger, s, f))
     signal.signal(signal.SIGTERM, lambda s, f: shutdown(logger, s, f))
 
-    logger.info("Starting gossip-syncer... Press Ctrl+C to exit.")
+    logger.info(f"Gossip-syncer running with {len(worker_threads)} workers... Press Ctrl+C to exit.")
 
-    while True:
-        try:
-            topic = socket.recv_string()  # Irrelevant
-            message = socket.recv_json()
-            forward_message_if_relevant(message, cache, logger, producer, KAFKA_TOPIC_TO_PUSH)
-        except Exception as e:
-            logger.exception(f"Unexpected error in main loop: {e}")
+    # Wait for workers to complete (they won't unless stop_event is set)
+    try:
+        while running:
+            signal.pause()
+    except (KeyboardInterrupt, SystemExit):
+        shutdown(logger)
 
 
 # Global variables
 running: bool = True
 producer: Optional[KafkaProducer] = None
+stop_event: Optional[threading.Event] = None
 
 if __name__ == "__main__":
     main()

@@ -1,18 +1,15 @@
 import hashlib
 import json
-from valkey import Valkey
-from config import VALKEY_HOST, VALKEY_PORT, VALKEY_PASSWORD
 
 from lnhistoryclient.model.types import GossipCache
+from valkey import Valkey
+
+from config import VALKEY_HOST, VALKEY_PASSWORD, VALKEY_PORT
+
 
 class ValkeyCache:
     def __init__(self) -> None:
-        self.client = Valkey(
-            host=VALKEY_HOST,
-            port=VALKEY_PORT,
-            password=VALKEY_PASSWORD,
-            db=0
-        )
+        self.client = Valkey(host=VALKEY_HOST, port=VALKEY_PORT, password=VALKEY_PASSWORD, db=0)
 
     @staticmethod
     def hash_raw_hex(raw_hex: str) -> str:
