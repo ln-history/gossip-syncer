@@ -1,6 +1,6 @@
 [project]
 name = "gossip-syncer"
-version = "0.1.0"
+version = "1.0.0"
 description = "A tool to subscribe to multiple zero message queue sockets running the [gossip-publisher-zmq] Core Lightning plugin, check for duplicates and publish unique gossip to a Kafka instance"
 authors = [
     { name = "Fabian Kraus", email = "fabian.felix.kraus@gmail.com" }
