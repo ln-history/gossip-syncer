@@ -61,7 +61,7 @@ def create_kafka_producer() -> KafkaProducer:
     )
 
 
-def construct_lightning_gossip_message(plugin_event: PluginEvent, cache: ValkeyCache) -> PlatformEvent:
+def construct_platform_event(plugin_event: PluginEvent, cache: ValkeyCache) -> PlatformEvent:
     """Constructs the outgoing message format with computed id."""
     plugin_event_metadata = plugin_event.get("metadata", {})
 
@@ -122,7 +122,7 @@ def forward_message_if_relevant(
 
     if msg_type in ALL_TYPES:
         if should_forward_message(message, cache, logger):
-            constructed = construct_lightning_gossip_message(message, cache)
+            constructed = construct_platform_event(message, cache)
             producer.send(topic, value=constructed)
             logger.info(f"Forwarded {msg_name} message to Kafka topic {topic}")
         else:
