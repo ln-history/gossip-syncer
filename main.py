@@ -210,7 +210,7 @@ def zmq_worker(
             socks = dict(poller.poll(timeout=1000))  # 1 second timeout
 
             if socket in socks and socks[socket] == zmq.POLLIN:
-                # topic = socket.recv_string()
+                topic = socket.recv_string()
                 message = socket.recv_json()
                 forward_message_if_relevant(message, cache, logger, producer, KAFKA_TOPIC_TO_PUSH)
 
