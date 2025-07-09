@@ -12,7 +12,8 @@ from typing import List, Optional, Dict, Any
 import zmq
 from kafka import KafkaProducer
 from lnhistoryclient.constants import ALL_TYPES, GOSSIP_TYPE_NAMES
-from lnhistoryclient.model.types import PlatformEvent, PluginEvent, PluginEventMetadata
+from lnhistoryclient.model.types import PluginEvent, PluginEventMetadata
+from lnhistoryclient.model.platform_internal import PlatformEvent
 from lnhistoryclient.parser.parser import parse_platform_event
 
 from config import KAFKA_SERVER_IP_ADDRESS, KAFKA_SERVER_PORT, KAFKA_TOPIC_TO_PUSH, KAFKA_SASL_PLAIN_USERNAME, KAFKA_SASL_PLAIN_PASSWORD, KAFKA_SSL_PASSWORD
@@ -169,8 +170,8 @@ def forward_message_if_relevant(
 
     if should_forward_message(plugin_event, cache, logger):
         try:
-            platform_event = construct_platform_event(plugin_event, cache, logger)
-            producer.send(topic, value=platform_event)
+            platform_event: PlatformEvent = construct_platform_event(plugin_event, cache, logger)
+            producer.send(topic, value=platform_event.to_dict())
             logger.info(f"Forwarded {msg_name} message to Kafka topic '{topic}'")
         except Exception as e:
             logger.error(f"Failed to construct or send {msg_name} message when handling PluginEvent {plugin_event}: {e}")
