@@ -7,14 +7,15 @@ import threading
 from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
 from types import FrameType
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 import zmq
 from kafka import KafkaProducer
 from lnhistoryclient.constants import ALL_TYPES, GOSSIP_TYPE_NAMES
-from lnhistoryclient.model.types import PlatformEvent, PlatformEventMetadata, PluginEvent, PluginEventMetadata
+from lnhistoryclient.model.types import PlatformEvent, PluginEvent, PluginEventMetadata
+from lnhistoryclient.parser.parser import parse_platform_event
 
-import config
+from config import KAFKA_SERVER_IP_ADDRESS, KAFKA_SERVER_PORT, KAFKA_TOPIC_TO_PUSH, KAFKA_SASL_PLAIN_USERNAME, KAFKA_SASL_PLAIN_PASSWORD, KAFKA_SSL_PASSWORD
 from ValkeyClient import ValkeyCache
 
 
@@ -27,15 +28,15 @@ class ZmqSource:
 
 def setup_logging(log_dir: str = "logs", log_file: str = "gossip_syncer.log") -> logging.Logger:
     os.makedirs(log_dir, exist_ok=True)
-    logger = logging.getLogger("gossip_syncer")
+    logger = logging.getLogger("gossip-syncer")
     logger.setLevel(logging.INFO)
 
     log_path = os.path.join(log_dir, log_file)
-    file_handler = RotatingFileHandler(log_path, maxBytes=5_000_000, backupCount=5)
-    file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    file_handler = RotatingFileHandler(log_path, maxBytes=5_000_000, backupCount=100)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s -  %(threadName)s - %(message)s"))
 
     stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    stream_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(threadName)s - %(message)s"))
 
     logger.addHandler(file_handler)
     logger.addHandler(stream_handler)
@@ -43,7 +44,7 @@ def setup_logging(log_dir: str = "logs", log_file: str = "gossip_syncer.log") ->
 
 
 def create_kafka_producer() -> KafkaProducer:
-    bootstrap_servers = f"{config.KAFKA_SERVER_IP_ADDRESS}:{config.KAFKA_SERVER_PORT}"
+    bootstrap_servers = f"{KAFKA_SERVER_IP_ADDRESS}:{KAFKA_SERVER_PORT}"
 
     return KafkaProducer(
         bootstrap_servers=[bootstrap_servers],
@@ -52,83 +53,129 @@ def create_kafka_producer() -> KafkaProducer:
         ssl_cafile="./certs/kafka.truststore.pem",
         ssl_certfile="./certs/kafka.keystore.pem",
         ssl_keyfile="./certs/kafka.keystore.pem",
-        ssl_password=os.getenv("SSL_PASSWORD"),
+        ssl_password=KAFKA_SSL_PASSWORD,
         sasl_mechanism="SCRAM-SHA-512",
-        sasl_plain_username=os.getenv("SASL_PLAIN_USERNAME"),
-        sasl_plain_password=os.getenv("SASL_PLAIN_PASSWORD"),
+        sasl_plain_username=KAFKA_SASL_PLAIN_USERNAME,
+        sasl_plain_password=KAFKA_SASL_PLAIN_PASSWORD,
         ssl_check_hostname=False,
         value_serializer=lambda v: json.dumps(v).encode("utf-8"),
     )
 
 
-def construct_platform_event(plugin_event: PluginEvent, cache: ValkeyCache) -> PlatformEvent:
-    """Constructs the outgoing message format with computed id."""
-    plugin_event_metadata = plugin_event.get("metadata", {})
+def construct_platform_event(plugin_event: Dict[str, Any], cache: ValkeyCache, logger: logging.Logger) -> PlatformEvent:
+    """
+    Converts a PluginEvent (from gossip-publisher-zmq) to a validated PlatformEvent.
 
-    raw_hex = plugin_event.get("raw_hex")
-    metadata: PlatformEventMetadata = {
-        "id": cache.hash_raw_hex(raw_hex),
-        "type": plugin_event_metadata.get("type"),
-        "timestamp": plugin_event_metadata.get("timestamp"),
-    }
+    This performs transformation from:
+      - plugin_event["raw_hex"] → raw_gossip_bytes
+      - calculates gossip_id = SHA256(raw_gossip_bytes)
+      - creates metadata including id
+      - passes result to `parse_platform_event()` for structure enforcement
 
-    return {
-        "metadata": metadata,
-        "raw_hex": raw_hex,
-    }
+    Args:
+        plugin_event (Dict[str, Any]): PluginEvent from Core Lightning plugin
+        logger (logging.Logger): Logger for diagnostics
+
+    Returns:
+        PlatformEvent: Validated event for internal processing
+
+    Raises:
+        ValueError: If any field is missing or malformed
+    """
+
+    try:
+        metadata = plugin_event.get("metadata")
+        raw_hex = plugin_event.get("raw_hex")
+
+        if not isinstance(metadata, dict):
+            raise ValueError("Missing or invalid 'metadata' in plugin_event")
+
+        if not isinstance(raw_hex, str):
+            raise ValueError("'raw_hex' must be a hex string")
+
+        try:
+            raw_gossip_bytes = bytes.fromhex(raw_hex)
+        except Exception:
+            raise ValueError("Invalid hex string in 'raw_hex'")
+
+        gossip_id = cache.hash_raw_bytes(raw_gossip_bytes)
+
+        platform_event_data = {
+            "metadata": {
+                "type": metadata.get("type"),
+                "timestamp": metadata.get("timestamp"),
+                "id": gossip_id
+            },
+            "raw_gossip_bytes": raw_gossip_bytes
+        }
+
+        event = parse_platform_event(platform_event_data)
+        logger.debug(
+            f"Parsed PlatformEvent: gossip_id={gossip_id.hex()}, type={metadata.get('type')}, "
+            f"timestamp={metadata.get('timestamp')}, sender={metadata.get('sender_node_id', 'unknown')}"
+        )
+        return event
+
+    except ValueError as ve:
+        logger.error(f"PluginEvent conversion failed: {ve}")
+        raise
+
+    except Exception as e:
+        logger.exception("Unexpected error during PluginEvent → PlatformEvent conversion")
+        raise
 
 
 def should_forward_message(plugin_event: PluginEvent, cache: ValkeyCache, logger: logging.Logger) -> bool:
     metadata: PluginEventMetadata = plugin_event.get("metadata", {})
     raw_hex = plugin_event.get("raw_hex")
 
-    if not metadata or not raw_hex:
-        logger.warning("Invalid message: missing metadata or raw_hex")
+    required_fields = ("timestamp", "sender_node_id", "type")
+    if not all(k in metadata for k in required_fields) or not raw_hex:
+        logger.warning("PluginEvent missing required metadata or raw_hex")
         return False
 
-    timestamp = metadata.get("timestamp")
-    node_id = metadata.get("sender_node_id")
-    msg_type = metadata.get("type")
+    timestamp = metadata["timestamp"]
+    node_id = metadata["sender_node_id"]
+    msg_type = metadata["type"]
+    gossip_name = GOSSIP_TYPE_NAMES.get(msg_type, f"unknown({msg_type})")
 
-    if None in (timestamp, node_id, msg_type):
-        logger.warning("Incomplete metadata (timestamp, sender_node_id, type)")
-        return False
-
-    msg_name = GOSSIP_TYPE_NAMES.get(msg_type, f"unknown({msg_type})")
-    logger.info(f"Handling {msg_name} message.")
-
-    msg_hash = cache.hash_raw_hex(raw_hex)
-    seen_by = cache.get_seen_from_node_id(msg_type, msg_hash)
+    gossip_id = cache.hash_raw_hex(raw_hex)
+    seen_by = cache.get_seen_from_node_id(msg_type, gossip_id)
 
     if not seen_by:
-        logger.info(f"New gossip message (hash={msg_hash[:8]}...) seen for the first time.")
+        logger.info(f"New gossip {gossip_name} message with gossip_id {gossip_id} seen for the first time by node {node_id}.")
     elif node_id not in seen_by:
-        logger.info(f"New node {node_id} for gossip hash={msg_hash[:8]}...")
+        logger.info(f"New node {node_id} for gossip {gossip_name} message with gossip_id {gossip_id} was collected.")
     elif timestamp not in seen_by[node_id]:
-        logger.info(f"New timestamp {timestamp} for node {node_id} and gossip hash={msg_hash[:8]}...")
+        logger.info(f"New timestamp {timestamp} from node {node_id} found for gossip {gossip_name} with gossip_id {gossip_id}.")
     else:
-        logger.debug(f"Duplicate message from {node_id} at {timestamp}, skipping.")
+        logger.debug(f"Duplicate gossip {gossip_name} with gossip_id {gossip_id} from {node_id} at {timestamp} found, skipping further handling!")
         return False
 
-    cache.append_seen_by(msg_type, msg_hash, node_id, timestamp)
+    cache.append_seen_by(msg_type, gossip_id, node_id, timestamp)
     return True
 
 
 def forward_message_if_relevant(
-    message: PluginEvent, cache: ValkeyCache, logger: logging.Logger, producer: KafkaProducer, topic: str
+    plugin_event: PluginEvent, cache: ValkeyCache, logger: logging.Logger, producer: KafkaProducer, topic: str
 ) -> None:
-    msg_type = message.get("metadata", {}).get("type")
+    metadata = plugin_event.get("metadata") or {}
+    msg_type = metadata.get("type")
     msg_name = GOSSIP_TYPE_NAMES.get(msg_type, f"unknown({msg_type})")
 
-    if msg_type in ALL_TYPES:
-        if should_forward_message(message, cache, logger):
-            constructed = construct_platform_event(message, cache)
-            producer.send(topic, value=constructed)
-            logger.info(f"Forwarded {msg_name} message to Kafka topic {topic}")
-        else:
-            logger.debug("Message skipped.")
+    if msg_type not in ALL_TYPES:
+        logger.error(f"Unknown gossip message type received: {msg_type} when handling PluginEvent {plugin_event}")
+        return
+
+    if should_forward_message(plugin_event, cache, logger):
+        try:
+            platform_event = construct_platform_event(plugin_event, cache, logger)
+            producer.send(topic, value=platform_event)
+            logger.info(f"Forwarded {msg_name} message to Kafka topic '{topic}'")
+        except Exception as e:
+            logger.error(f"Failed to construct or send {msg_name} message when handling PluginEvent {plugin_event}: {e}")
     else:
-        logger.error(f"Unknown gossip message type received: {msg_type}")
+        logger.debug(f"PluginEvent {plugin_event} skipped.")
 
 
 def zmq_worker(
@@ -153,8 +200,7 @@ def zmq_worker(
             if socket in socks and socks[socket] == zmq.POLLIN:
                 topic = socket.recv_string()
                 message = socket.recv_json()
-                logger.debug(f"Received message from {source.host}:{source.port} with topic '{topic}'")
-                forward_message_if_relevant(message, cache, logger, producer, config.KAFKA_TOPIC_TO_PUSH)
+                forward_message_if_relevant(message, cache, logger, producer, KAFKA_TOPIC_TO_PUSH)
 
     except Exception as e:
         logger.exception(f"Error in ZMQ worker for {source.host}:{source.port}: {e}")

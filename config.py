@@ -5,6 +5,10 @@ from dotenv import load_dotenv
 
 load_dotenv(".env")
 
+KAFKA_SASL_PLAIN_USERNAME = os.getenv("KAFKA_SASL_PLAIN_USERNAME")
+KAFKA_SASL_PLAIN_PASSWORD = os.getenv("KAFKA_SASL_PLAIN_PASSWORD")
+KAFKA_SSL_PASSWORD = os.getenv("KAFKA_SSL_PASSWORD")
+
 KAFKA_SERVER_IP_ADDRESS = os.getenv("KAFKA_SERVER_IP_ADDRESS", "localhost")
 KAFKA_SERVER_PORT = os.getenv("KAFKA_SERVER_PORT", 9092)
 

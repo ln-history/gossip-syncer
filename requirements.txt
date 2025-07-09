@@ -2,4 +2,4 @@ kafka-python
 python-dotenv
 valkey
 zmq
-lnhistoryclient==3.0.1
+lnhistoryclient==3.2.0
