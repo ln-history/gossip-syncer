@@ -72,12 +72,12 @@ def create_kafka_producer() -> KafkaProducer:
 
 def construct_platform_event(plugin_event: Dict[str, Any], cache: ValkeyCache, logger: logging.Logger) -> PlatformEvent:
     """
-    Converts a PluginEvent (from gossip-publisher-zmq) to a validated PlatformEvent.
+    Converts a PluginEvent (from gossip-publisher-zmq) to a validated PlatformEvent using the parse_platform_event() function provided by the lnhistoryclient library.
 
     This performs transformation from:
-      - plugin_event["raw_hex"] → raw_gossip_bytes
-      - calculates gossip_id = SHA256(raw_gossip_bytes)
-      - creates metadata including id
+      - plugin_event["raw_hex"] → raw_gossip_hex
+      - calculates gossip_id = SHA256(bytes.fromhex(raw_gossip_hex))
+      - creates metadata including id (as hex string)
       - passes result to `parse_platform_event()` for structure enforcement
 
     Args:
@@ -92,40 +92,16 @@ def construct_platform_event(plugin_event: Dict[str, Any], cache: ValkeyCache, l
     """
 
     try:
-        metadata = plugin_event.get("metadata")
-        raw_hex = plugin_event.get("raw_hex")
-
-        if not isinstance(metadata, dict):
-            raise ValueError("Missing or invalid 'metadata' in plugin_event")
-
-        if not isinstance(raw_hex, str):
-            raise ValueError("'raw_hex' must be a hex string")
-
-        try:
-            raw_gossip_bytes = bytes.fromhex(raw_hex)
-        except Exception as e:
-            raise ValueError(f"Invalid hex string in 'raw_hex': {e}") from e
-
-        gossip_id = cache.hash_raw_bytes(raw_gossip_bytes)
-
-        platform_event_data = {
-            "metadata": {"type": metadata.get("type"), "timestamp": metadata.get("timestamp"), "id": gossip_id},
-            "raw_gossip_bytes": raw_gossip_bytes,
-        }
-
-        event = parse_platform_event(platform_event_data)
-        logger.debug(
-            f"Parsed PlatformEvent: gossip_id={gossip_id.hex()}, type={metadata.get('type')}, "
-            f"timestamp={metadata.get('timestamp')}, sender={metadata.get('sender_node_id', 'unknown')}"
-        )
-        return event
+        platform_event = parse_platform_event(plugin_event)
+        logger.debug(f"Parsed PlatformEvent: {platform_event}")
+        return platform_event
 
     except ValueError as ve:
         logger.error(f"PluginEvent conversion failed: {ve}")
         raise
 
-    except Exception:
-        logger.exception("Unexpected error during PluginEvent → PlatformEvent conversion")
+    except Exception as e:
+        logger.exception(f"Unexpected error during PluginEvent → PlatformEvent conversion: {e}")
         raise
 
 
@@ -210,7 +186,7 @@ def zmq_worker(
             socks = dict(poller.poll(timeout=1000))  # 1 second timeout
 
             if socket in socks and socks[socket] == zmq.POLLIN:
-                topic = socket.recv_string()
+                _ = socket.recv_string()
                 message = socket.recv_json()
                 forward_message_if_relevant(message, cache, logger, producer, KAFKA_TOPIC_TO_PUSH)
 
