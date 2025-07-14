@@ -156,8 +156,15 @@ def forward_message_if_relevant(
     if should_forward_message(plugin_event, cache, logger):
         try:
             platform_event: PlatformEvent = construct_platform_event(plugin_event, cache, logger)
-            producer.send(topic, value=platform_event.to_dict())
-            logger.info(f"Forwarded {msg_name} message to Kafka topic '{topic}'")
+            future = producer.send(topic, value=platform_event.to_dict())
+
+            # This will block until the message is actually sent and acknowledged
+            record_metadata = future.get(timeout=10)
+
+            logger.info(
+                f"Forwarded {msg_name} message to Kafka topic '{topic}' "
+                f"(partition {record_metadata.partition}, offset {record_metadata.offset})"
+            )
         except Exception as e:
             logger.error(
                 f"Failed to construct or send {msg_name} message when handling PluginEvent {plugin_event}: {e}"
