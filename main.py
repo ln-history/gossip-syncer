@@ -92,11 +92,14 @@ def construct_platform_event(plugin_event: Dict[str, Any], cache: ValkeyCache, l
     """
 
     try:
-        platform_event_constructed = {}
-        platform_event_constructed["metadata"]["id"] = cache.hash_raw_hex(plugin_event.get("raw_hex"))
-        platform_event_constructed["metadata"]["timestamp"] = plugin_event.get("metadata").get("timestamp")
-        platform_event_constructed["metadata"]["type"] = plugin_event.get("metadata").get("type")
-        platform_event_constructed["raw_gossip_hex"] = plugin_event.get("raw_hex")
+        platform_event_constructed = {
+            "metadata": {
+                "id": cache.hash_raw_hex(plugin_event.get("raw_hex")),
+                "timestamp": plugin_event.get("metadata").get("timestamp"),
+                "type": plugin_event.get("metadata").get("type"),
+            },
+            "raw_gossip_hex": plugin_event.get("raw_hex"),
+        }
 
         platform_event = parse_platform_event(platform_event_constructed)
         logger.debug(f"Parsed PlatformEvent: {platform_event}")
