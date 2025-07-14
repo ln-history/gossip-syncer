@@ -76,7 +76,7 @@ def construct_platform_event(plugin_event: Dict[str, Any], cache: ValkeyCache, l
 
     This performs transformation from:
       - plugin_event["raw_hex"] → raw_gossip_hex
-      - calculates gossip_id = SHA256(bytes.fromhex(raw_gossip_hex))
+      - calculates id = SHA256(bytes.fromhex(raw_hex))
       - creates metadata including id (as hex string)
       - passes result to `parse_platform_event()` for structure enforcement
 
@@ -92,6 +92,7 @@ def construct_platform_event(plugin_event: Dict[str, Any], cache: ValkeyCache, l
     """
 
     try:
+        plugin_event["metadata"]["id"] = cache.hash_raw_hex(plugin_event.get("raw_hex"))
         platform_event = parse_platform_event(plugin_event)
         logger.debug(f"Parsed PlatformEvent: {platform_event}")
         return platform_event
