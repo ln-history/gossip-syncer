@@ -12,12 +12,13 @@
 
 `gossip-syncer` is a microservice that listens to one or muliple [ZeroMQ](https://zmq.org) stream(s) of gossip messages from the [Bitcoin Lightning Network](https://lightning.network/).
 For [Core Lightning](https://corelightning.org/) nodes the [gossip-publisher-zmq plugin](https://github.com/ln-history/gossip-publisher-zmq) can be used. 
+New messages are then filtered and sent to a kafka topic.
 
 For each message:
 
 - It computes a unique `gossip_id` using a [SHA256](https://en.wikipedia.org/wiki/SHA-2) hash of the raw binary of every consumed gossip message
 - It checks a [Valkey](https://valkey.io/) (Redis-compatible) cache to determine if this message has been seen before
-- Metadata is recorded for each message (e. g. `sender_nod_id` the `node_id` of the Bitcoin Lightning Node that had sent the message)
+- Metadata is recorded for each message (e. g. `sender_node_id` the `node_id` of the Bitcoin Lightning Node that had sent the message)
 - Only new messages are forwarded to a specified [Kafka](https://kafka.apache.org/) topic
 
 ---
@@ -28,7 +29,8 @@ For each message:
 
 - Gossip messages are handled in **raw binary** form.
 - A SHA256 hash is computed over the full binary, producing a unique `gossip_id`.
-- The **first 2 bytes** of the message specify its type, as specified in the [BOLT #7](https://github.com/lightning/bolts/blob/master/07-routing-gossip.md) specification.
+- The first part of the gossip message is a **varint** that indicates the length of the message. (See [here](https://github.com/ln-history/ln-history-python-client/blob/main/lnhistoryclient/parser/common.py) for details)
+- The next **2 bytes** of the message specify its type, as specified in the [BOLT #7](https://github.com/lightning/bolts/blob/master/07-routing-gossip.md) specification.
 
 ### 🧊 Cache Structure (Valkey)
 
@@ -75,7 +77,7 @@ If `gossip_id` **already exists**:
 
 #### ❌ Unsupported Type
 
-If the message type is **not in** `[256, 257, 258, 4103]`:
+If the message type is **not in** `[256, 257, 258, 4101, 4102, 4103, 4104, 4105, 4106]`:
 
 - Log an error.
 - Do **not** publish or store.
@@ -88,16 +90,18 @@ If the message type is **not in** `[256, 257, 258, 4103]`:
 
 Each message consumed from ZeroMQ has this JSON shape:
 
-```json
+```js
 {
   "metadata": {
     "type": 256,                     // Message type from BOLT #7
-    "timestamp": "2025-06-11T12:00:00Z",  // Timestamp when the gossip message was seen
-    "is_dying": false,              // Status information about the gossip-publisher-zmq plugin (can be ignored)
+    "timestamp": 17232...,  // Timestamp when the gossip message was seen
     "sender_node_id": "029a...",     // Node ID that collected and relayed the message
     "length": 136                    // Byte length excluding 2-byte type prefix
   },
-  "raw_hex": "0100abcdef..."         // Full hex-encoded message payload
+  "raw_hex": "0100abcdef...",         // Full hex-encoded message payload
+  "parsed": {
+    "key": value                      // Depending on the message type, the values parsed in json 
+  }
 }
 ```
 
@@ -115,4 +119,4 @@ cp .example.env .env
 ```
 
 2. Open `.env` and fill in the credentials and configuration values.
-💡 Make sure your .env file is never committed to version control—it's ignored via .gitignore.
+💡 Make sure your `.env` file is never committed to version control—it's ignored via `.gitignore`.

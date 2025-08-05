@@ -11,7 +11,14 @@ from typing import Any, Dict, List, Optional
 
 import zmq
 from kafka import KafkaProducer
-from lnhistoryclient.constants import ALL_TYPES, GOSSIP_TYPE_NAMES
+from lnhistoryclient.constants import (
+    ALL_TYPES,
+    GOSSIP_TYPE_NAMES,
+    MSG_TYPE_CHANNEL_ANNOUNCEMENT,
+    MSG_TYPE_CHANNEL_DYING,
+    MSG_TYPE_CHANNEL_UPDATE,
+    MSG_TYPE_NODE_ANNOUNCEMENT,
+)
 from lnhistoryclient.model.platform_internal import PlatformEvent
 from lnhistoryclient.model.types import PluginEvent, PluginEventMetadata
 from lnhistoryclient.parser.parser import parse_platform_event
@@ -56,7 +63,7 @@ def create_kafka_producer() -> KafkaProducer:
 
     return KafkaProducer(
         bootstrap_servers=[bootstrap_servers],
-        client_id="gossip-syncer",
+        client_id="gossip-syncer-test",
         security_protocol="SASL_SSL",
         ssl_cafile="./certs/kafka.truststore.pem",
         ssl_certfile="./certs/kafka.keystore.pem",
@@ -72,45 +79,67 @@ def create_kafka_producer() -> KafkaProducer:
 
 def construct_platform_event(plugin_event: Dict[str, Any], cache: ValkeyCache, logger: logging.Logger) -> PlatformEvent:
     """
-    Converts a PluginEvent (from gossip-publisher-zmq) to a validated PlatformEvent using the parse_platform_event() function provided by the lnhistoryclient library.
+    Safely converts a PluginEvent (from gossip-publisher-zmq) into a validated PlatformEvent.
 
-    This performs transformation from:
-      - plugin_event["raw_hex"] → raw_gossip_hex
-      - calculates id = SHA256(bytes.fromhex(raw_hex))
-      - creates metadata including id (as hex string)
-      - passes result to `parse_platform_event()` for structure enforcement
-
-    Args:
-        plugin_event (Dict[str, Any]): PluginEvent from Core Lightning plugin
-        logger (logging.Logger): Logger for diagnostics
-
-    Returns:
-        PlatformEvent: Validated event for internal processing
+    Steps performed:
+      - Validates presence and types of required fields in plugin_event
+      - Computes "id" = SHA256(raw_hex)
+      - Builds dict in the shape expected by parse_platform_event()
+      - Delegates validation and construction to parse_platform_event()
 
     Raises:
-        ValueError: If any field is missing or malformed
+        ValueError: If input is missing or malformed.
     """
 
-    try:
-        platform_event_constructed = {
-            "metadata": {
-                "id": cache.hash_raw_hex(plugin_event.get("raw_hex")),
-                "timestamp": plugin_event.get("metadata").get("timestamp"),
-                "type": plugin_event.get("metadata").get("type"),
-            },
-            "raw_gossip_hex": plugin_event.get("raw_hex"),
-        }
+    if not isinstance(plugin_event, dict):
+        raise ValueError(f"PluginEvent must be a dict, got {type(plugin_event)}")
 
-        platform_event = parse_platform_event(platform_event_constructed)
+    # --- Validate raw_hex ---
+    raw_hex = plugin_event.get("raw_hex")
+    if not isinstance(raw_hex, str):
+        raise ValueError("'raw_hex' must be provided in PluginEvent and must be a hex string")
+
+    try:
+        bytes.fromhex(raw_hex)
+    except Exception as e:
+        raise ValueError(f"'raw_hex' is not valid hex: {raw_hex!r}") from e
+
+    # --- Validate metadata dict ---
+    meta = plugin_event.get("metadata")
+    if not isinstance(meta, dict):
+        raise ValueError("'metadata' must be a dict inside PluginEvent")
+
+    event_type = meta.get("type")
+    if not isinstance(event_type, int):
+        raise ValueError("'metadata.type' must be an int")
+
+    timestamp = meta.get("timestamp")
+    if not isinstance(timestamp, int):
+        raise ValueError("'metadata.timestamp' must be an int")
+
+    # --- Construct dict for parse_platform_event() ---
+    platform_event_dict = {
+        "metadata": {
+            "id": cache.hash_raw_hex(raw_hex),
+            "type": event_type,
+            "timestamp": timestamp,
+        },
+        "raw_gossip_hex": raw_hex,
+    }
+
+    try:
+        platform_event = parse_platform_event(platform_event_dict)
         logger.debug(f"Parsed PlatformEvent: {platform_event}")
         return platform_event
 
-    except ValueError as ve:
-        logger.error(f"PluginEvent conversion failed: {ve}")
+    except ValueError:
+        # re-raise ValueErrors from parse_platform_event with good context
+        logger.error("PluginEvent conversion failed", exc_info=True)
         raise
 
-    except Exception as e:
-        logger.exception(f"Unexpected error during PluginEvent → PlatformEvent conversion: {e}")
+    except Exception:
+        # catch everything else as unexpected
+        logger.exception("Unexpected error converting PluginEvent to PlatformEvent")
         raise
 
 
@@ -120,13 +149,22 @@ def should_forward_message(plugin_event: PluginEvent, cache: ValkeyCache, logger
 
     required_fields = ("timestamp", "sender_node_id", "type")
     if not all(k in metadata for k in required_fields) or not raw_hex:
-        logger.warning("PluginEvent missing required metadata or raw_hex")
+        logger.warning(f"PluginEvent with raw_hex {raw_hex} missing required metadata or raw_hex")
         return False
 
     timestamp = metadata["timestamp"]
     node_id = metadata["sender_node_id"]
     msg_type = metadata["type"]
     gossip_name = GOSSIP_TYPE_NAMES.get(msg_type, f"unknown({msg_type})")
+    if msg_type not in [
+        MSG_TYPE_CHANNEL_ANNOUNCEMENT,
+        MSG_TYPE_NODE_ANNOUNCEMENT,
+        MSG_TYPE_CHANNEL_UPDATE,
+        MSG_TYPE_CHANNEL_DYING,
+    ]:
+        logger.warning(
+            f"Collected PluginEvent is of type {gossip_name} and does not get published to ln-history platform."
+        )
 
     gossip_id = cache.hash_raw_hex(raw_hex)
     seen_by = cache.get_seen_from_node_id(msg_type, gossip_id)
@@ -137,12 +175,15 @@ def should_forward_message(plugin_event: PluginEvent, cache: ValkeyCache, logger
         )
     elif node_id not in seen_by:
         logger.info(f"New node {node_id} for gossip {gossip_name} message with gossip_id {gossip_id} was collected.")
+        logger.info(f"Skipping publishing message with gossip_id {gossip_id} to ln-history platform.")
+        return False
+
     elif timestamp not in seen_by[node_id]:
         logger.info(
             f"New timestamp {timestamp} from node {node_id} found for gossip {gossip_name} with gossip_id {gossip_id}."
         )
     else:
-        logger.debug(
+        logger.warning(
             f"Duplicate gossip {gossip_name} with gossip_id {gossip_id} from {node_id} at {timestamp} found, skipping further handling!"
         )
         return False
@@ -171,12 +212,12 @@ def forward_message_if_relevant(
             record_metadata = future.get(timeout=10)
 
             logger.info(
-                f"Forwarded {msg_name} message to Kafka topic '{topic}' "
+                f"Forwarded {msg_name} message with gossip_id {platform_event.metadata.id} to Kafka topic '{topic}' "
                 f"(partition {record_metadata.partition}, offset {record_metadata.offset})"
             )
         except Exception as e:
             logger.error(
-                f"Failed to construct or send {msg_name} message when handling PluginEvent {plugin_event}: {e}"
+                f"Failed to construct or send {msg_name} message with gossip_id {platform_event.metadata.id} when handling PluginEvent {plugin_event}: {e}"
             )
     else:
         logger.debug(f"PluginEvent {plugin_event} skipped.")
@@ -192,7 +233,7 @@ def zmq_worker(
     try:
         socket.connect(f"tcp://{source.host}:{source.port}")
         socket.setsockopt_string(zmq.SUBSCRIBE, source.topic)
-        logger.info(f"Worker connected to ZeroMQ at {source.host}:{source.port} for topic '{source.topic}'")
+        logger.info(f"Worker connected to ZeroMQ at tcp://{source.host}:{source.port} for topic '{source.topic}'")
 
         # Configure socket to poll with timeout to check for stop event
         poller = zmq.Poller()
@@ -202,16 +243,16 @@ def zmq_worker(
             socks = dict(poller.poll(timeout=1000))  # 1 second timeout
 
             if socket in socks and socks[socket] == zmq.POLLIN:
-                _ = socket.recv_string()
+                _ = socket.recv_string()  # topic can be ignored
                 message = socket.recv_json()
                 forward_message_if_relevant(message, cache, logger, producer, KAFKA_TOPIC_TO_PUSH)
 
     except Exception as e:
-        logger.exception(f"Error in ZMQ worker for {source.host}:{source.port}: {e}")
+        logger.exception(f"Error in ZMQ worker for tcp://{source.host}:{source.port}: {e}")
 
     finally:
         socket.close()
-        logger.info(f"ZMQ worker for {source.host}:{source.port} shut down")
+        logger.info(f"ZMQ worker for tcp://{source.host}:{source.port} shut down")
 
 
 def parse_zmq_sources() -> List[ZmqSource]:
@@ -231,7 +272,7 @@ def parse_zmq_sources() -> List[ZmqSource]:
 def shutdown(logger: logging.Logger, signum: Optional[int] = None, frame: Optional[FrameType] = None) -> None:
     """Clean up resources"""
     global running, producer, stop_event
-    logger.info("Shutting down gossip-post-processor...")
+    logger.info("Shutting down gossip-syncer...")
     running = False
 
     # Signal all worker threads to stop
@@ -252,7 +293,9 @@ def main() -> None:
 
     # Initialize shared resources
     cache = ValkeyCache()
+    logger.info("Setup of Valkey cache successful")
     producer = create_kafka_producer()
+    logger.info("Setup of Kafka producer successful")
     stop_event = threading.Event()
 
     # Parse ZMQ sources from config

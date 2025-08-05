@@ -15,6 +15,7 @@ KAFKA_SERVER_PORT = os.getenv("KAFKA_SERVER_PORT", 9092)
 VALKEY_HOST = os.getenv("VALKEY_HOST", "localhost")
 VALKEY_PORT = int(os.getenv("VALKEY_PORT", 6379))
 VALKEY_PASSWORD = os.getenv("VALKEY_PASSWORD", None)
+VALKEY_DB = int(os.getenv("VALKEY_DB", 0))
 
 KAFKA_TOPIC_TO_PUSH = os.getenv("KAFKA_TOPIC_TO_PUSH", "gossip.all")
 

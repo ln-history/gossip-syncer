@@ -4,12 +4,12 @@ import json
 from lnhistoryclient.model.types import GossipIdCacheValue
 from valkey import Valkey
 
-from config import VALKEY_HOST, VALKEY_PASSWORD, VALKEY_PORT
+from config import VALKEY_DB, VALKEY_HOST, VALKEY_PASSWORD, VALKEY_PORT
 
 
 class ValkeyCache:
     def __init__(self) -> None:
-        self.client = Valkey(host=VALKEY_HOST, port=VALKEY_PORT, password=VALKEY_PASSWORD, db=0)
+        self.client = Valkey(host=VALKEY_HOST, port=VALKEY_PORT, password=VALKEY_PASSWORD, db=VALKEY_DB)
 
     @staticmethod
     def hash_raw_bytes(raw_bytes: bytes) -> bytes:
